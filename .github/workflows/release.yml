@@ -1,0 +1,30 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The (semver) version
+        default: ''
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code.
+        uses: actions/checkout@v2
+      - name: Setup JDK 1.8
+        uses: actions/setup-java@v1
+        with:
+          java-version: 1.8
+      - name: Ensure gradlew is executable
+        run: chmod +x gradlew
+      - name: Validate the gradle wrapper
+        uses: gradle/wrapper-validation-action@v1
+      - name: Publish release
+        run: ./gradlew publish --stacktrace
+        env:
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
+          MAVEN_URL: https://maven.tomthegeek.ml/releases/
+          MAVEN_USERNAME: github-actions-release
+          MAVEN_PASSWORD: ${{ secrets.MAVEN_PASSWORD }}
