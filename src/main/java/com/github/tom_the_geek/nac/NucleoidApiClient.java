@@ -3,20 +3,29 @@ package com.github.tom_the_geek.nac;
 import com.github.tom_the_geek.nac.ex.RequestException;
 import com.github.tom_the_geek.nac.response.NucleoidServerStatus;
 import com.google.gson.Gson;
-import okhttp3.*;
-import org.jetbrains.annotations.NotNull;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.ClassicHttpRequest;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.util.Objects;
+import java.nio.charset.Charset;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class NucleoidApiClient implements AutoCloseable {
-    private final OkHttpClient client;
+    private final ExecutorService executor;
+    private final CloseableHttpClient client;
     private final String apiBase;
     private final Gson gson;
 
-    private NucleoidApiClient(OkHttpClient client, String apiBase, Gson gson) {
+    private NucleoidApiClient(ExecutorService executor, CloseableHttpClient client, String apiBase, Gson gson) {
+        this.executor = executor;
         this.client = client;
         this.gson = gson;
         if (!apiBase.endsWith("/")) {
@@ -27,47 +36,42 @@ public class NucleoidApiClient implements AutoCloseable {
     }
 
     public CompletableFuture<NucleoidServerStatus> getServerStatus(String server) {
-        Request request = get("status/" + server)
-                .build();
+        HttpGet request = get("status/" + server);
         return this.makeRequest(NucleoidServerStatus.class, request);
     }
 
-    private <T> CompletableFuture<T> makeRequest(Class<T> cls, Request request) {
+    private <T> CompletableFuture<T> makeRequest(Class<T> cls, ClassicHttpRequest request) {
         CompletableFuture<T> future = new CompletableFuture<>();
 
-        this.client.newCall(request)
-                .enqueue(new Callback() {
-                    @Override
-                    public void onFailure(@NotNull Call call, @NotNull IOException e) {
-                        future.completeExceptionally(e);
-                    }
+        this.executor.execute(() -> {
+            try (CloseableHttpResponse res = this.client.execute(request)) {
 
-                    @Override
-                    public void onResponse(@NotNull Call call, @NotNull Response response) throws IOException {
-                        int code = response.code();
-                        if (code < 200 || code >= 300) {
-                            if (code == 404) {
-                                future.completeExceptionally(new FileNotFoundException());
-                            } else {
-                                future.completeExceptionally(new RequestException(code));
-                            }
-                        }
-                        String data = Objects.requireNonNull(response.body(), "response.body()").string();
-                        future.complete(NucleoidApiClient.this.gson.fromJson(data, cls));
+                int code = res.getCode();
+                if (code < 200 || code >= 300) {
+                    if (code == 404) {
+                        future.completeExceptionally(new FileNotFoundException());
+                    } else {
+                        future.completeExceptionally(new RequestException(code));
                     }
-                });
+                }
+
+                String data = EntityUtils.toString(res.getEntity(), Charset.defaultCharset());
+                future.complete(NucleoidApiClient.this.gson.fromJson(data, cls));
+            } catch (Throwable e) {
+                future.completeExceptionally(e);
+            }
+        });
 
         return future;
     }
 
-    private Request.Builder get(String url) {
-        return this.request()
-                .get().url(this.formatUrl(url));
+    private HttpGet get(String url) {
+        return request(new HttpGet(this.formatUrl(url)));
     }
 
-    private Request.Builder request() {
-        return new Request.Builder()
-                .header("User-Agent", "NucleoidApiClient v1 (https://github.com/Tom-The-Geek/nucleoid-api-client)");
+    private <T extends ClassicHttpRequest> T request(T req) {
+        req.setHeader("User-Agent", "NucleoidApiClient v1 (https://github.com/Tom-The-Geek/nucleoid-api-client)");
+        return req;
     }
 
     private String formatUrl(String path) {
@@ -79,21 +83,31 @@ public class NucleoidApiClient implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        this.client.connectionPool().evictAll();
-        this.client.dispatcher().executorService().shutdown();
+    public void close() throws IOException {
+        this.client.close();
+        this.executor.shutdown();
     }
 
     public static class Builder {
-        private OkHttpClient client = new OkHttpClient();
+        private ExecutorService executor = Executors.newSingleThreadExecutor();
+        private CloseableHttpClient client = HttpClients.createDefault();
         private String apiBase = "https://api.nucleoid.xyz";
         private Gson gson = new Gson();
 
-        public OkHttpClient getClient() {
+        public Executor getExecutor() {
+            return this.executor;
+        }
+
+        public Builder executor(ExecutorService executor) {
+            this.executor = executor;
+            return this;
+        }
+
+        public CloseableHttpClient getClient() {
             return client;
         }
 
-        public Builder client(OkHttpClient client) {
+        public Builder client(CloseableHttpClient client) {
             this.client = client;
             return this;
         }
@@ -117,7 +131,7 @@ public class NucleoidApiClient implements AutoCloseable {
         }
 
         public NucleoidApiClient build() {
-            return new NucleoidApiClient(this.client, this.apiBase, gson);
+            return new NucleoidApiClient(this.executor, this.client, this.apiBase, gson);
         }
     }
 }
